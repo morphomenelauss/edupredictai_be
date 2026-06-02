@@ -24,7 +24,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 # ── Groq Client ───────────────────────────────────────────────
 client = Groq(api_key=GROQ_API_KEY)
 
-GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_MODEL = os.getenv("GROQ_MODEL", "").strip() or "llama-3.1-8b-instant"
 
 # ── FastAPI Router ────────────────────────────────────────────
 router = APIRouter(
