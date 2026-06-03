@@ -400,24 +400,11 @@ def _recommendation_prompt(req) -> str:
     levels = _classify_numerik(f)
 
     risk_tone = {
-        "High": (
-            "Siswa butuh bantuan segera. "
-            "Tulis rekomendasi yang tegas, konkret, dan bisa dimulai minggu ini. "
-            "Nada: serius tapi tetap suportif dan tidak menghakimi."
-        ),
-        "Medium": (
-            "Siswa perlu dorongan untuk berkembang. "
-            "Tulis rekomendasi yang membangun dan bisa diterapkan bertahap. "
-            "Nada: encouragement, optimis, suportif."
-        ),
-        "Low": (
-            "Siswa sudah bagus! "
-            "Tulis rekomendasi yang mengapresiasi dan mendorong konsistensi. "
-            "Nada: hangat, bangga, positif."
-        ),
+        "High":   "Tegas, konkret, bisa dimulai minggu ini. Nada serius tapi suportif.",
+        "Medium": "Membangun, bisa diterapkan bertahap. Nada optimis dan encouragement.",
+        "Low":    "Apresiasi dan dorong konsistensi. Nada hangat dan positif.",
     }.get(p.risk_category, "")
 
-    # Identifikasi faktor kritis untuk fokus rekomendasi — internal
     critical = []
     if levels['attendance'] in ('kritis', 'perlu_perhatian'):
         critical.append(f"kehadiran {f.Attendance}%")
@@ -426,94 +413,30 @@ def _recommendation_prompt(req) -> str:
     if f.Motivation_Level == "Low":
         critical.append("motivasi rendah")
     if levels['prev'] in ('kritis', 'perlu_perhatian'):
-        critical.append(f"nilai rapor {f.Previous_Scores}/100")
+        critical.append(f"nilai {f.Previous_Scores}/100")
     if f.Parental_Involvement == "Low":
-        critical.append("keterlibatan orang tua kurang")
+        critical.append("orang tua kurang terlibat")
     if f.Peer_Influence == "Negative":
         critical.append("pengaruh teman negatif")
-    if f.Access_to_Resources == "Low":
-        critical.append("sumber belajar terbatas")
-    if f.Family_Income == "Low":
-        critical.append("kondisi ekonomi keluarga rendah")
 
-    focus = (
-        f"Prioritaskan rekomendasi pada: {', '.join(critical)}."
-        if critical else
-        "Siswa tidak punya faktor kritis — fokus pada penguatan dan apresiasi."
-    )
+    focus = f"Fokus: {', '.join(critical)}." if critical else "Fokus: penguatan dan apresiasi."
 
-    return f"""
-Kamu adalah asisten akademik yang membantu guru merancang langkah nyata untuk membina siswanya.
-Gunakan bahasa yang hangat, praktis, dan mudah dipahami guru Indonesia.
+    return f"""Kamu asisten akademik. Bantu guru dengan rekomendasi praktis dan hangat.
 
-ARAHAN UTAMA:
-{risk_tone}
-
-DATA SISWA:
-Risiko          : {p.risk_category} ({p.confidence:.0f}% keyakinan model)
-Kehadiran       : {f.Attendance}%
-Jam Belajar     : {f.Hours_Studied} jam/minggu
-Jam Tidur       : {f.Sleep_Hours} jam/malam
-Nilai Rapor     : {f.Previous_Scores}/100
-Motivasi        : {f.Motivation_Level}
-Sesi Bimbingan  : {f.Tutoring_Sessions} sesi
-Pengaruh Teman  : {f.Peer_Influence}
-Keterlibatan Ortu: {f.Parental_Involvement}
-Akses Internet  : {f.Internet_Access}
-Sumber Belajar  : {f.Access_to_Resources}
-Pendapatan Kel. : {f.Family_Income}
-Kualitas Guru   : {f.Teacher_Quality}
-Aktivitas Fisik : {f.Physical_Activity}x/minggu
-Pendidikan Ortu : {f.Parental_Education_Level}
-
-FOKUS (panduan internal, jangan tampilkan ke output):
+ARAHAN: {risk_tone}
 {focus}
 
-PANDUAN PENULISAN (ikuti ketat):
+DATA: Risiko {p.risk_category} | Kehadiran {f.Attendance}% | Belajar {f.Hours_Studied}j/minggu | Nilai {f.Previous_Scores} | Motivasi {f.Motivation_Level} | Ortu {f.Parental_Involvement} | Teman {f.Peer_Influence}
 
-"title" — 5–8 kata, jelas, aksi nyata
-  BAGUS : "Ajak Diskusi Santai tentang Hambatan Belajar"
-  KURANG: "Perhatikan Kondisi Siswa Lebih Lanjut"
+ATURAN KETAT:
+- "title": 5–7 kata, aksi konkret
+- "description": 1 kalimat, max 20 kata, sebut angka/kondisi aktual
+- "action": 1 kalimat, max 15 kata, langsung bisa dikerjakan guru
+- Jangan sebut: dataset, model, AI, sistem
 
-"description" — 2 kalimat, max 35 kata total
-  - Kalimat 1: kenapa ini penting untuk siswa INI (sebutkan angka/kondisi aktualnya)
-  - Kalimat 2: dampak jika dilakukan atau tidak dilakukan
-  - Nada hangat, tidak menggurui, tidak kaku
-  - JANGAN sebut: dataset, model, AI, sistem
+OUTPUT: JSON array murni, tepat 4 item, tanpa teks lain.
 
-"action" — 1 kalimat, max 20 kata, langsung bisa dikerjakan guru
-  - Sebutkan caranya atau siapa yang terlibat
-  BAGUS : "Hubungi orang tua minggu ini untuk diskusi singkat tentang kebiasaan belajar di rumah."
-  KURANG: "Lakukan komunikasi dengan pihak terkait."
-
-ATURAN OUTPUT:
-- JSON array murni, tepat 4 item
-- Tidak ada teks di luar array, tidak ada markdown
-
-FORMAT:
-[
-  {{
-    "title": "5-8 kata judul aksi konkret",
-    "description": "2 kalimat max 35 kata total berbasis kondisi aktual siswa.",
-    "action": "1 kalimat langkah yang bisa langsung dilakukan guru."
-  }},
-  {{
-    "title": "...",
-    "description": "...",
-    "action": "..."
-  }},
-  {{
-    "title": "...",
-    "description": "...",
-    "action": "..."
-  }},
-  {{
-    "title": "...",
-    "description": "...",
-    "action": "..."
-  }}
-]
-"""
+[{{"title":"...","description":"...","action":"..."}},{{"title":"...","description":"...","action":"..."}},{{"title":"...","description":"...","action":"..."}},{{"title":"...","description":"...","action":"..."}}]"""
 
 
 
@@ -743,7 +666,7 @@ async def recommendations(req: StudentAnalysisRequest):
 
     try:
         if GROQ_API_KEY:
-            raw = await _call_llm(_recommendation_prompt(req), max_tokens=1500)
+            raw = await _call_llm(_recommendation_prompt(req), max_tokens=500)
             parsed = _parse_json(raw)
             recs = [RecommendationItem(**item) for item in parsed]
             source = "groq"
