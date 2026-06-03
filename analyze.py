@@ -445,89 +445,147 @@ OUTPUT: JSON array murni, tepat 4 item, tanpa teks lain.
 # ─────────────────────────────────────────────────────────────
 
 def _rule_factors(req: StudentAnalysisRequest) -> List[DominantFactor]:
-
     f = req.features
+    p = req.prediction
     factors = []
 
-    # ── 1. KEHADIRAN (WAJIB) ──────────────────────────────────
-    if f.Attendance < 75:
-        attendance_status = "danger"
-        attendance_note = "Kehadiran rendah dan perlu perhatian serius."
-    elif f.Attendance < 85:
-        attendance_status = "warning"
-        attendance_note = "Kehadiran cukup baik tetapi masih perlu ditingkatkan."
-    elif f.Attendance < 95:
-        attendance_status = "good"
-        attendance_note = "Kehadiran siswa sudah baik dan cukup konsisten."
+    # ── 1. KEHADIRAN ─────────────────────────────────────────
+    att = f.Attendance
+    if att < 65:
+        att_status = "danger"
+        att_note = f"Kehadiran {att:.0f}% sangat kritis — siswa kehilangan lebih dari sepertiga waktu belajar."
+    elif att < 75:
+        att_status = "danger"
+        att_note = f"Kehadiran {att:.0f}% rendah dan berisiko tertinggal banyak materi penting."
+    elif att < 80:
+        att_status = "warning"
+        att_note = f"Kehadiran {att:.0f}% masih di bawah standar — perlu konsistensi lebih tiap minggu."
+    elif att < 85:
+        att_status = "warning"
+        att_note = f"Kehadiran {att:.0f}% cukup, tapi masih ada ruang untuk lebih konsisten hadir."
+    elif att < 90:
+        att_status = "good"
+        att_note = f"Kehadiran {att:.0f}% sudah baik dan menunjukkan kedisiplinan yang cukup stabil."
+    elif att < 95:
+        att_status = "good"
+        att_note = f"Kehadiran {att:.0f}% sangat baik — siswa hampir selalu hadir dan mengikuti pelajaran."
     else:
-        attendance_status = "good"
-        attendance_note = "Kehadiran sangat baik dan menunjukkan disiplin tinggi."
+        att_status = "good"
+        att_note = f"Kehadiran {att:.0f}% sempurna — siswa sangat disiplin dan tidak melewatkan kelas."
+
+    # Override status jika High Risk
+    if p.risk_category == "High" and att_status == "good":
+        att_status = "warning"
 
     factors.append(DominantFactor(
         factor="Kehadiran",
-        value=f"{f.Attendance:.0f}%",
-        status=attendance_status,
-        note=attendance_note,
+        value=f"{att:.0f}%",
+        status=att_status,
+        note=att_note,
     ))
 
-    # ── 2. NILAI SEBELUMNYA (WAJIB) ───────────────────────────
-    if f.Previous_Scores < 50:
+    # ── 2. NILAI AKADEMIK ─────────────────────────────────────
+    ps = f.Previous_Scores
+    if ps < 50:
         score_status = "danger"
-        score_note = "Nilai akademik sangat rendah dan perlu pendampingan intensif."
-    elif f.Previous_Scores < 70:
+        score_note = f"Nilai {ps:.0f}/100 sangat rendah — siswa perlu pendampingan intensif segera."
+    elif ps < 60:
+        score_status = "danger"
+        score_note = f"Nilai {ps:.0f}/100 masih jauh dari target — pemahaman materi perlu diperkuat."
+    elif ps < 70:
         score_status = "warning"
-        score_note = "Nilai masih berada di bawah target optimal."
-    elif f.Previous_Scores < 85:
+        score_note = f"Nilai {ps:.0f}/100 berada di bawah rata-rata kelas dan perlu ditingkatkan."
+    elif ps < 78:
+        score_status = "warning"
+        score_note = f"Nilai {ps:.0f}/100 cukup namun belum optimal — masih ada potensi yang bisa digali."
+    elif ps < 85:
         score_status = "good"
-        score_note = "Nilai akademik cukup baik dan stabil."
+        score_note = f"Nilai {ps:.0f}/100 cukup baik dan menunjukkan pemahaman materi yang memadai."
+    elif ps < 92:
+        score_status = "good"
+        score_note = f"Nilai {ps:.0f}/100 sangat baik — siswa memahami materi dengan konsisten."
     else:
         score_status = "good"
-        score_note = "Nilai akademik sangat baik dan konsisten."
+        score_note = f"Nilai {ps:.0f}/100 luar biasa — siswa menguasai materi dengan sangat baik."
+
+    if p.risk_category == "High" and score_status == "good":
+        score_status = "warning"
 
     factors.append(DominantFactor(
-        factor="Nilai akademik",
-        value=f"{f.Previous_Scores:.0f}/100",
+        factor="Nilai Akademik",
+        value=f"{ps:.0f}/100",
         status=score_status,
         note=score_note,
     ))
 
-    # ── 3. MOTIVASI (WAJIB) ───────────────────────────────────
-    if f.Motivation_Level == "Low":
-        motivation_status = "danger"
-        motivation_note = "Motivasi belajar rendah dan perlu dorongan tambahan."
-    elif f.Motivation_Level == "Medium":
-        motivation_status = "info"
-        motivation_note = "Motivasi cukup baik namun masih dapat ditingkatkan."
+    # ── 3. MOTIVASI ──────────────────────────────────────────
+    motiv = f.Motivation_Level
+    hours = f.Hours_Studied
+
+    if motiv == "Low" and hours < 8:
+        motiv_status = "danger"
+        motiv_note = f"Motivasi rendah diperparah jam belajar hanya {hours} jam — siswa butuh dorongan segera."
+    elif motiv == "Low" and hours >= 8:
+        motiv_status = "danger"
+        motiv_note = f"Motivasi rendah meski belajar {hours} jam/minggu — kualitas belajar perlu diperhatikan."
+    elif motiv == "Medium" and p.risk_category == "High":
+        motiv_status = "warning"
+        motiv_note = f"Motivasi sedang belum cukup untuk mengejar ketertinggalan — perlu stimulus lebih."
+    elif motiv == "Medium" and ps < 70:
+        motiv_status = "warning"
+        motiv_note = f"Motivasi sedang dengan nilai {ps:.0f} — siswa perlu didorong agar lebih giat belajar."
+    elif motiv == "Medium":
+        motiv_status = "info"
+        motiv_note = f"Motivasi sedang dan masih bisa ditingkatkan agar hasil belajar lebih maksimal."
+    elif motiv == "High" and p.risk_category == "High":
+        motiv_status = "warning"
+        motiv_note = f"Motivasi tinggi tapi belum terefleksi pada performa — arah belajar perlu diperjelas."
+    elif motiv == "High" and ps >= 85:
+        motiv_status = "good"
+        motiv_note = f"Motivasi tinggi sejalan dengan nilai {ps:.0f} — kombinasi yang sangat positif."
     else:
-        motivation_status = "good"
-        motivation_note = "Motivasi belajar sangat baik."
+        motiv_status = "good"
+        motiv_note = f"Motivasi belajar tinggi — siswa menunjukkan semangat yang perlu terus dijaga."
 
     factors.append(DominantFactor(
-        factor="Motivasi belajar",
-        value=f.Motivation_Level,
-        status=motivation_status,
-        note=motivation_note,
+        factor="Motivasi Belajar",
+        value=motiv,
+        status=motiv_status,
+        note=motiv_note,
     ))
 
-    # ── 4. JAM BELAJAR (WAJIB) ────────────────────────────────
-    if f.Hours_Studied < 3:
-        study_status = "danger"
-        study_note = "Jam belajar sangat kurang."
-    elif f.Hours_Studied < 7:
-        study_status = "warning"
-        study_note = "Jam belajar masih kurang optimal."
-    elif f.Hours_Studied < 12:
-        study_status = "info"
-        study_note = "Jam belajar cukup baik."
+    # ── 4. JAM BELAJAR ───────────────────────────────────────
+    hrs = f.Hours_Studied
+    if hrs < 5:
+        hrs_status = "danger"
+        hrs_note = f"Jam belajar {hrs} jam/minggu sangat kurang — siswa perlu jadwal belajar yang terstruktur."
+    elif hrs < 8:
+        hrs_status = "danger"
+        hrs_note = f"Hanya {hrs} jam/minggu jauh dari ideal — sulit mengejar materi dengan waktu ini."
+    elif hrs < 12:
+        hrs_status = "warning"
+        hrs_note = f"Jam belajar {hrs} jam/minggu masih di bawah optimal — perlu ditambah secara bertahap."
+    elif hrs < 16:
+        hrs_status = "warning"
+        hrs_note = f"Jam belajar {hrs} jam/minggu cukup, tapi masih ada ruang untuk lebih konsisten."
+    elif hrs < 22:
+        hrs_status = "good"
+        hrs_note = f"Jam belajar {hrs} jam/minggu sudah baik dan mendukung pemahaman materi dengan solid."
+    elif hrs < 28:
+        hrs_status = "good"
+        hrs_note = f"Jam belajar {hrs} jam/minggu sangat baik — siswa menunjukkan dedikasi belajar yang tinggi."
     else:
-        study_status = "good"
-        study_note = "Jam belajar sangat baik dan konsisten."
+        hrs_status = "good"
+        hrs_note = f"Jam belajar {hrs} jam/minggu sangat intensif — pastikan kualitas dan istirahatnya tetap terjaga."
+
+    if p.risk_category == "High" and hrs_status == "good":
+        hrs_status = "warning"
 
     factors.append(DominantFactor(
-        factor="Jam belajar",
-        value=f"{f.Hours_Studied} jam/minggu",
-        status=study_status,
-        note=study_note,
+        factor="Jam Belajar",
+        value=f"{hrs} jam/minggu",
+        status=hrs_status,
+        note=hrs_note,
     ))
 
     # Sort: danger → warning → info → good
@@ -542,74 +600,156 @@ def _rule_factors(req: StudentAnalysisRequest) -> List[DominantFactor]:
 # ─────────────────────────────────────────────────────────────
 
 def _rule_recommendations(req: StudentAnalysisRequest) -> List[RecommendationItem]:
-
     f = req.features
+    p = req.prediction
     recs = []
 
-    # ── Kehadiran ─────────────────────────────────────────────
-    if f.Attendance < 75:
+    # ── REC 1: Kehadiran ─────────────────────────────────────
+    att = f.Attendance
+    if att < 65:
         recs.append(RecommendationItem(
-            text="Tingkatkan konsistensi kehadiran siswa karena absensi masih rendah."
+            title="Selidiki Penyebab Ketidakhadiran Segera",
+            description=f"Kehadiran {att:.0f}% sangat kritis — siswa kehilangan lebih dari sepertiga pelajaran. Tanpa intervensi cepat, ketertinggalan materi akan semakin sulit dikejar.",
+            action="Hubungi orang tua minggu ini untuk mencari tahu penyebab dan buat kesepakatan perbaikan kehadiran."
         ))
-    elif f.Attendance < 90:
+    elif att < 80:
         recs.append(RecommendationItem(
-            text="Pertahankan kehadiran dan usahakan lebih konsisten setiap minggu."
+            title="Bangun Kebiasaan Hadir Lebih Konsisten",
+            description=f"Kehadiran {att:.0f}% masih di bawah standar dan berpotensi mengganggu pemahaman materi. Pola absensi yang berulang perlu segera diidentifikasi penyebabnya.",
+            action="Pantau kehadiran mingguan dan diskusikan hambatannya langsung dengan siswa secara personal."
         ))
-    else:
+    elif att < 90:
         recs.append(RecommendationItem(
-            text="Kehadiran siswa sangat baik dan perlu dipertahankan."
-        ))
-
-    # ── Jam Belajar ───────────────────────────────────────────
-    if f.Hours_Studied < 5:
-        recs.append(RecommendationItem(
-            text="Tambahkan jam belajar menjadi minimal 8–10 jam per minggu."
-        ))
-    elif f.Hours_Studied < 10:
-        recs.append(RecommendationItem(
-            text="Tingkatkan konsistensi belajar agar hasil akademik lebih optimal."
+            title="Pertahankan dan Tingkatkan Konsistensi Hadir",
+            description=f"Kehadiran {att:.0f}% sudah cukup baik namun masih ada beberapa pertemuan yang terlewat. Konsistensi hadir akan memperkuat pemahaman materi secara menyeluruh.",
+            action="Berikan apresiasi kecil saat siswa hadir penuh dalam satu minggu untuk membangun motivasi."
         ))
     else:
         recs.append(RecommendationItem(
-            text="Jam belajar siswa sudah baik dan menunjukkan disiplin belajar yang positif."
+            title="Apresiasi Kedisiplinan Kehadiran Siswa",
+            description=f"Kehadiran {att:.0f}% sangat baik dan mencerminkan kedisiplinan yang perlu dijaga. Siswa yang konsisten hadir cenderung memiliki pemahaman materi yang lebih solid.",
+            action="Sampaikan apresiasi langsung kepada siswa agar motivasi dan kedisiplinannya tetap terjaga."
         ))
 
-    # ── Motivasi ──────────────────────────────────────────────
-    if f.Motivation_Level == "Low":
+    # ── REC 2: Jam Belajar + Nilai ───────────────────────────
+    hrs = f.Hours_Studied
+    ps = f.Previous_Scores
+    if hrs < 8 and ps < 70:
         recs.append(RecommendationItem(
-            text="Berikan motivasi dan target belajar kecil agar siswa lebih percaya diri."
+            title="Buat Jadwal Belajar Terstruktur Bersama Siswa",
+            description=f"Kombinasi {hrs} jam belajar/minggu dan nilai {ps:.0f} adalah sinyal yang perlu ditangani segera. Tanpa jadwal yang jelas, waktu belajar akan terus tidak teroptimalkan.",
+            action="Bantu siswa menyusun jadwal belajar harian sederhana yang realistis dan bisa dijalankan konsisten."
         ))
-    elif f.Motivation_Level == "Medium":
+    elif hrs < 12:
         recs.append(RecommendationItem(
-            text="Dorong siswa untuk lebih aktif dan konsisten dalam belajar."
+            title="Dorong Penambahan Waktu Belajar Bertahap",
+            description=f"Dengan {hrs} jam/minggu, siswa belum mencapai durasi belajar yang optimal untuk hasil maksimal. Menambah 2–3 jam per minggu secara bertahap bisa berdampak signifikan pada nilai.",
+            action="Sarankan siswa menambah satu sesi belajar 30 menit setiap hari untuk membangun kebiasaan."
+        ))
+    elif hrs >= 22 and ps >= 85:
+        recs.append(RecommendationItem(
+            title="Jaga Keseimbangan Belajar dan Istirahat",
+            description=f"Jam belajar {hrs} jam/minggu sangat tinggi dan sejalan dengan nilai {ps:.0f} yang memuaskan. Namun intensitas tinggi perlu diimbangi istirahat cukup agar tidak kelelahan.",
+            action="Ingatkan siswa untuk menjaga pola tidur dan waktu bermain agar stamina belajar tetap optimal."
         ))
     else:
         recs.append(RecommendationItem(
-            text="Motivasi belajar siswa sangat baik dan perlu terus diapresiasi."
+            title="Tingkatkan Kualitas Sesi Belajar Siswa",
+            description=f"Jam belajar {hrs} jam/minggu sudah cukup — fokus selanjutnya adalah efektivitas belajarnya. Belajar dengan teknik yang tepat bisa meningkatkan hasil tanpa menambah durasi.",
+            action="Bagikan teknik belajar aktif seperti rangkuman atau latihan soal agar sesi belajar lebih produktif."
         ))
 
-    # ── Faktor ke-4 (Dinamis) ─────────────────────────────────
-    if f.Sleep_Hours < 6:
-        dynamic = "Perbaiki pola tidur siswa karena waktu istirahat masih kurang."
-    elif f.Peer_Influence == "Negative":
-        dynamic = "Perhatikan lingkungan pertemanan siswa agar tetap mendukung proses belajar."
-    elif f.Parental_Involvement == "Low":
-        dynamic = "Ajak orang tua lebih aktif mendampingi proses belajar siswa di rumah."
-    elif f.Tutoring_Sessions == 0 and f.Previous_Scores < 70:
-        dynamic = "Pertimbangkan bimbingan belajar tambahan untuk membantu pemahaman materi."
-    elif f.Physical_Activity < 2:
-        dynamic = "Dorong siswa lebih aktif secara fisik untuk membantu fokus dan konsentrasi."
-    elif (
-        f.Attendance >= 95
-        and f.Previous_Scores >= 85
-        and f.Motivation_Level == "High"
-        and f.Hours_Studied >= 10
-    ):
-        dynamic = "Performa akademik siswa sangat baik. Pertahankan konsistensi dan semangat belajarnya."
-    else:
-        dynamic = "Pantau perkembangan akademik siswa secara berkala agar performa tetap stabil."
+    # ── REC 3: Motivasi + Dukungan ───────────────────────────
+    motiv = f.Motivation_Level
+    parental = f.Parental_Involvement
+    peer = f.Peer_Influence
 
-    recs.append(RecommendationItem(text=dynamic))
+    if motiv == "Low" and parental == "Low":
+        recs.append(RecommendationItem(
+            title="Libatkan Orang Tua untuk Bangkitkan Motivasi",
+            description=f"Motivasi rendah ditambah kurangnya keterlibatan orang tua menciptakan kondisi belajar yang tidak kondusif. Dukungan dari rumah sangat krusial untuk membangun kepercayaan diri siswa.",
+            action="Jadwalkan pertemuan dengan orang tua untuk membahas cara mendukung semangat belajar di rumah."
+        ))
+    elif motiv == "Low" and peer == "Negative":
+        recs.append(RecommendationItem(
+            title="Tangani Pengaruh Lingkungan yang Negatif",
+            description=f"Motivasi rendah diperparah pengaruh teman yang negatif — dua faktor ini saling memperlemah semangat belajar. Siswa perlu diarahkan ke lingkungan pertemanan yang lebih suportif.",
+            action="Ajak siswa bicara personal tentang lingkaran pertemanannya dan dorong bergabung ke kelompok belajar positif."
+        ))
+    elif motiv == "Low":
+        recs.append(RecommendationItem(
+            title="Bangun Kepercayaan Diri dengan Target Kecil",
+            description=f"Motivasi rendah sering berasal dari rasa tidak mampu yang menumpuk dari waktu ke waktu. Keberhasilan kecil yang konsisten bisa memulihkan semangat belajar siswa secara perlahan.",
+            action="Berikan tugas kecil yang bisa diselesaikan siswa dan rayakan keberhasilannya di depan kelas."
+        ))
+    elif motiv == "Medium" and p.risk_category in ("High", "Medium"):
+        recs.append(RecommendationItem(
+            title="Perkuat Motivasi agar Tidak Stagnan",
+            description=f"Motivasi sedang belum cukup untuk mendorong perubahan signifikan pada kondisi belajar saat ini. Sedikit dorongan yang tepat bisa menggeser motivasi ke level yang lebih tinggi.",
+            action="Ceritakan kisah sukses siswa lain yang pernah berada di posisi serupa untuk memicu semangat."
+        ))
+    else:
+        recs.append(RecommendationItem(
+            title="Apresiasi Semangat Belajar yang Positif",
+            description=f"Motivasi {motiv.lower()} siswa adalah aset berharga yang perlu terus dipupuk oleh guru. Apresiasi yang konsisten akan menjaga semangat ini tetap menyala dalam jangka panjang.",
+            action="Berikan pengakuan verbal atau catatan positif di buku siswa untuk menguatkan motivasi belajarnya."
+        ))
+
+    # ── REC 4: Faktor Dinamis ────────────────────────────────
+    slp = f.Sleep_Hours
+    tutoring = f.Tutoring_Sessions
+    physical = f.Physical_Activity
+    resources = f.Access_to_Resources
+    income = f.Family_Income
+
+    if slp < 6:
+        recs.append(RecommendationItem(
+            title="Perbaiki Pola Tidur untuk Fokus Belajar",
+            description=f"Tidur {slp:.0f} jam/malam jauh dari ideal — kurang tidur langsung menurunkan konsentrasi dan daya serap materi. Perbaikan pola tidur bisa meningkatkan performa tanpa menambah jam belajar.",
+            action="Diskusikan dengan siswa dan orang tua tentang pentingnya tidur 7–8 jam untuk mendukung belajar."
+        ))
+    elif tutoring == 0 and ps < 70:
+        recs.append(RecommendationItem(
+            title="Pertimbangkan Bimbingan Belajar Tambahan",
+            description=f"Nilai {ps:.0f}/100 tanpa sesi bimbingan sama sekali menunjukkan siswa perlu dukungan belajar lebih. Bimbingan tambahan bisa membantu mengisi celah pemahaman yang tertinggal.",
+            action="Rekomendasikan program remedial sekolah atau bimbingan teman sebaya untuk mata pelajaran terlemah."
+        ))
+    elif peer == "Negative" and motiv != "Low":
+        recs.append(RecommendationItem(
+            title="Arahkan ke Lingkungan Pertemanan yang Positif",
+            description=f"Pengaruh teman yang negatif bisa perlahan menggerus semangat belajar meskipun motivasi siswa saat ini masih baik. Intervensi dini lebih mudah dilakukan sebelum dampaknya terasa.",
+            action="Dorong siswa bergabung dengan kelompok belajar atau ekstrakurikuler yang lingkungannya suportif."
+        ))
+    elif parental == "Low" and income == "Low":
+        recs.append(RecommendationItem(
+            title="Berikan Dukungan Ekstra dari Sekolah",
+            description=f"Keterbatasan ekonomi dan kurangnya perhatian orang tua membuat siswa lebih bergantung pada dukungan guru. Sekolah bisa mengisi peran penting dalam menjaga motivasi dan akses belajarnya.",
+            action="Koordinasikan dengan BK untuk memastikan siswa mendapat akses ke fasilitas belajar yang tersedia di sekolah."
+        ))
+    elif resources == "Low" and income == "Low":
+        recs.append(RecommendationItem(
+            title="Pastikan Akses Belajar yang Memadai",
+            description=f"Sumber belajar terbatas dengan kondisi ekonomi rendah bisa menjadi hambatan tersembunyi yang signifikan. Memastikan akses ke buku dan internet adalah fondasi penting untuk belajar efektif.",
+            action="Hubungkan siswa dengan program bantuan sekolah atau perpustakaan untuk memenuhi kebutuhan belajarnya."
+        ))
+    elif physical < 2:
+        recs.append(RecommendationItem(
+            title="Dorong Aktivitas Fisik untuk Konsentrasi",
+            description=f"Aktivitas fisik hanya {physical}x/minggu terlalu sedikit — olahraga ringan terbukti meningkatkan fokus dan suasana hati saat belajar. Pergerakan tubuh membantu otak lebih siap menyerap materi.",
+            action="Sarankan siswa berjalan kaki atau olahraga ringan minimal 20 menit setiap hari sebelum belajar."
+        ))
+    elif att >= 90 and ps >= 85 and motiv == "High" and hrs >= 16:
+        recs.append(RecommendationItem(
+            title="Tantang Siswa dengan Materi yang Lebih Dalam",
+            description=f"Performa sangat baik di semua aspek menunjukkan siswa ini siap untuk tantangan yang lebih besar. Memberikan materi pengayaan akan menjaga motivasinya tetap tinggi dan mencegah kebosanan.",
+            action="Berikan soal pengayaan atau proyek mandiri yang menantang untuk mengembangkan potensi optimalnya."
+        ))
+    else:
+        recs.append(RecommendationItem(
+            title="Pantau Perkembangan Secara Berkala",
+            description=f"Kondisi belajar siswa secara keseluruhan perlu dipantau agar tidak ada faktor yang memburuk tanpa terdeteksi. Pemantauan rutin membantu guru bertindak sebelum masalah menjadi lebih besar.",
+            action="Lakukan check-in singkat dengan siswa setiap dua minggu untuk memantau perkembangan dan hambatannya."
+        ))
 
     return recs[:4]
 
