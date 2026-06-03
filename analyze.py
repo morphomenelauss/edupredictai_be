@@ -445,7 +445,9 @@ OUTPUT: JSON array murni, tepat 4 item, tanpa teks lain.
 # ─────────────────────────────────────────────────────────────
 
 def _rule_factors(req: StudentAnalysisRequest) -> List[DominantFactor]:
-    f = req.features
+    # Insight harus menggunakan nilai asli (raw) dari user.
+    # Jika features_raw tidak tersedia, fallback ke features.
+    f = getattr(req, 'features_raw', req.features)
     p = req.prediction
     hr = p.risk_category == "High"
     factors = []
@@ -513,7 +515,9 @@ def _rule_factors(req: StudentAnalysisRequest) -> List[DominantFactor]:
 # ─────────────────────────────────────────────────────────────
 
 def _rule_recommendations(req: StudentAnalysisRequest) -> List[RecommendationItem]:
-    f = req.features
+    # Insight harus menggunakan nilai asli (raw) dari user.
+    # Jika features_raw tidak tersedia, fallback ke features.
+    f = getattr(req, 'features_raw', req.features)
     p = req.prediction
     hr = p.risk_category == "High"
     mr = p.risk_category == "Medium"
@@ -666,6 +670,7 @@ def _rule_recommendations(req: StudentAnalysisRequest) -> List[RecommendationIte
         ))
 
     return recs[:4]
+
 
 
 
