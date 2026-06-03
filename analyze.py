@@ -98,7 +98,9 @@ class DominantFactor(BaseModel):
 
 
 class RecommendationItem(BaseModel):
-    text: str
+    title: str
+    description: str
+    action: str
 
 
 class StudentMeta(BaseModel):
@@ -131,19 +133,24 @@ async def _call_llm(prompt: str, max_tokens: int = 512) -> str:
     if not GROQ_API_KEY:
         raise ValueError("GROQ_API_KEY tidak di-set.")
 
-    print("\n=== GROQ REQUEST START ===")
-
     response = client.chat.completions.create(
         model=GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "user", "content": prompt}
+        ],
         temperature=0.3,
         max_tokens=max_tokens,
     )
 
+    print("\n=== GROQ DEBUG ===")
+    print("finish_reason:", response.choices[0].finish_reason)
+    print("usage:", response.usage)
+
     content = response.choices[0].message.content
 
-    print("[GROQ SUCCESS]")
-    print(content[:1000])
+    print("content length:", len(content))
+    print(content[:2000])
+    print("==================")
 
     return content.strip()
 
@@ -152,19 +159,29 @@ async def _call_llm(prompt: str, max_tokens: int = 512) -> str:
 # JSON Parser
 # ─────────────────────────────────────────────────────────────
 
-def _parse_json(text: str) -> list:
+def _parse_json(text: str):
 
-    text = re.sub(r"```json|```", "", text).strip()
+    text = re.sub(
+        r"```json|```",
+        "",
+        text
+    ).strip()
 
-    match = re.search(r"\[.*\]", text, re.DOTALL)
+    start = text.find("[")
 
-    if match:
-        return json.loads(match.group())
+    if start == -1:
+        raise ValueError(
+            f"Tidak ada JSON array: {text[:300]}"
+        )
 
-    raise ValueError(
-        f"Tidak ada JSON array dalam response: {text[:300]}"
-    )
+    json_text = text[start:]
 
+    try:
+        return json.loads(json_text)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"JSON invalid: {e}\n\n{json_text[:500]}"
+        )
 
 # ─────────────────────────────────────────────────────────────
 # Prompt Builders
@@ -172,167 +189,332 @@ def _parse_json(text: str) -> list:
 # narasi, tapi identitas utama tetap student_id di payload.
 # ─────────────────────────────────────────────────────────────
 
-def _display_name(req: StudentAnalysisRequest) -> str:
-    """Prefer name if provided, fall back to student_id."""
-    return req.name if req.name else req.student_id
+def _display_name(req):
+    return req.student_id
 
 
-def _factor_prompt(req: StudentAnalysisRequest) -> str:
+# ================================================================
+# PROMPT v3 — EduPredict AI · GenAI (Groq/Gemma)
+# Perubahan dari v2:
+# - Note lebih ringkas, on point, tidak bertele-tele (max 25 kata)
+# - Bahasa lebih natural dan ramah untuk guru Indonesia
+# - Schema recommendations tetap {title, description, action}
+#   tapi description dan action lebih padat
+# - Guardrail inkonsistensi: status WAJIB selaras risk_category
+# ================================================================
 
+
+def _classify_numerik(f) -> dict:
+    """
+    Klasifikasikan fitur numerik ke level kondisi.
+    Digunakan internal — tidak terekspos ke output.
+    Berdasarkan distribusi aktual dataset (6.607 siswa):
+      Attendance: min=60, max=100, mean=80
+      Hours_Studied: min=4, max=36, mean=20
+      Previous_Scores: min=50, max=100, mean=75
+      Sleep_Hours: min=4, max=10, ideal=6-8
+      Tutoring_Sessions: min=0, max=3.5, mean=1.4
+    """
+    levels = {}
+
+    att = f.Attendance
+    if att >= 90:
+        levels['attendance'] = 'optimal'
+    elif att >= 80:
+        levels['attendance'] = 'baik'
+    elif att >= 70:
+        levels['attendance'] = 'perlu_perhatian'
+    else:
+        levels['attendance'] = 'kritis'
+
+    hrs = f.Hours_Studied
+    if hrs >= 24:
+        levels['hours'] = 'optimal'
+    elif hrs >= 16:
+        levels['hours'] = 'baik'
+    elif hrs >= 10:
+        levels['hours'] = 'perlu_perhatian'
+    else:
+        levels['hours'] = 'kritis'
+
+    ps = f.Previous_Scores
+    if ps >= 88:
+        levels['prev'] = 'optimal'
+    elif ps >= 63:
+        levels['prev'] = 'baik'
+    elif ps >= 55:
+        levels['prev'] = 'perlu_perhatian'
+    else:
+        levels['prev'] = 'kritis'
+
+    slp = f.Sleep_Hours
+    levels['sleep'] = 'optimal' if 6 <= slp <= 8 else 'perlu_perhatian'
+
+    levels['tutoring'] = 'baik' if f.Tutoring_Sessions >= 1 else 'perlu_perhatian'
+
+    return levels
+
+
+def _status_rule(risk_category: str, level: str) -> str:
+    """
+    Tentukan status yang konsisten antara risk_category dan kondisi fitur.
+    Mencegah inkonsistensi seperti: High Risk + status 'good' di semua faktor.
+
+    Aturan:
+    - High Risk  → status buruk minimal 'warning', tidak boleh semua 'good'
+    - Medium Risk → campuran 'warning' dan 'good' diperbolehkan
+    - Low Risk   → mayoritas 'good', boleh ada 'info'
+    """
+    if risk_category == "High":
+        mapping = {
+            'optimal':         'warning',  # tetap apresiasi tapi tetap waspada
+            'baik':            'warning',
+            'perlu_perhatian': 'danger',
+            'kritis':          'danger',
+        }
+    elif risk_category == "Medium":
+        mapping = {
+            'optimal':         'good',
+            'baik':            'good',
+            'perlu_perhatian': 'warning',
+            'kritis':          'danger',
+        }
+    else:  # Low Risk
+        mapping = {
+            'optimal':         'good',
+            'baik':            'good',
+            'perlu_perhatian': 'info',
+            'kritis':          'warning',
+        }
+    return mapping.get(level, 'info')
+
+
+def _factor_prompt(req) -> str:
     f = req.features
     p = req.prediction
+    levels = _classify_numerik(f)
+
+    # Tentukan status yang konsisten dengan risk_category
+    att_status   = _status_rule(p.risk_category, levels['attendance'])
+    hrs_status   = _status_rule(p.risk_category, levels['hours'])
+    prev_status  = _status_rule(p.risk_category, levels['prev'])
+    motiv_level  = 'optimal' if f.Motivation_Level == 'High' else ('baik' if f.Motivation_Level == 'Medium' else 'kritis')
+    motiv_status = _status_rule(p.risk_category, motiv_level)
+
+    # Konteks risiko — memandu AI secara internal
+    risk_context = {
+        "High":   "Kondisi siswa membutuhkan perhatian serius dan tindakan segera dari guru.",
+        "Medium": "Kondisi siswa perlu dipantau agar tidak memburuk.",
+        "Low":    "Kondisi siswa baik dan perlu dipertahankan.",
+    }.get(p.risk_category, "")
 
     return f"""
-Kamu adalah AI academic analyst.
+Kamu adalah asisten akademik yang membantu guru memahami kondisi belajar siswanya.
+Gunakan bahasa yang hangat, jelas, dan mudah dipahami — seperti rekan guru yang berbagi informasi.
 
-Tugas:
-Analisis kondisi akademik siswa berdasarkan data yang diberikan.
+KONDISI SISWA: {risk_context}
 
-Pilih TEPAT 4 faktor dominan yang paling mempengaruhi
-performa akademik siswa.
+DATA SISWA:
+Risiko          : {p.risk_category} ({p.confidence:.0f}% keyakinan model)
+Kehadiran       : {f.Attendance}%
+Jam Belajar     : {f.Hours_Studied} jam/minggu
+Jam Tidur       : {f.Sleep_Hours} jam/malam
+Nilai Rapor     : {f.Previous_Scores}/100
+Motivasi        : {f.Motivation_Level}
+Sesi Bimbingan  : {f.Tutoring_Sessions} sesi
+Pengaruh Teman  : {f.Peer_Influence}
+Keterlibatan Ortu: {f.Parental_Involvement}
+Akses Internet  : {f.Internet_Access}
+Sumber Belajar  : {f.Access_to_Resources}
+Pendapatan Kel. : {f.Family_Income}
+Kualitas Guru   : {f.Teacher_Quality}
+Aktivitas Fisik : {f.Physical_Activity}x/minggu
+Pendidikan Ortu : {f.Parental_Education_Level}
 
-4 faktor yang WAJIB ada:
+PANDUAN STATUS YANG SUDAH DITENTUKAN (ikuti ini, jangan ubah):
+- Kehadiran ({f.Attendance}%)   → status WAJIB: "{att_status}"
+- Nilai Rapor ({f.Previous_Scores}/100) → status WAJIB: "{prev_status}"
+- Motivasi ({f.Motivation_Level})        → status WAJIB: "{motiv_status}"
+- Jam Belajar ({f.Hours_Studied} jam)  → status WAJIB: "{hrs_status}"
+
+TUGAS:
+Tulis analisis 4 faktor akademik dominan sesuai data siswa di atas.
+Faktor yang WAJIB ada (urutan tetap):
 1. Kehadiran
-2. Nilai akademik
-3. Motivasi belajar
-4. Jam belajar
+2. Nilai Akademik
+3. Motivasi Belajar
+4. Jam Belajar
 
-Untuk setiap faktor:
-- tentukan status
-- jelaskan singkat penyebab atau dampaknya
+ATURAN PENULISAN "note":
+- Maksimal 20 kata — singkat dan langsung ke poin
+- Sertakan nilai aktual siswa (angka/level)
+- Jelaskan kondisinya secara konkret, bukan umum
+- Bahasa natural, hangat, tidak kaku
+- JANGAN gunakan kata: dataset, model, sistem, AI, pelatihan
 
-Data siswa:
-Nama: {_display_name(req)}
-Kategori Risiko: {p.risk_category}
-Confidence Risiko: {p.confidence:.0f}%
-Prediksi Nilai: {p.predicted_exam_score:.1f}/100
+CONTOH note BAGUS (20 kata, natural):
+  "Kehadiran 65% cukup mengkhawatirkan — siswa kehilangan hampir sepertiga waktu belajar di kelas."
+  "Motivasi yang rendah membuat siswa sulit konsisten mengerjakan tugas dan mengikuti pelajaran."
 
-Kehadiran: {f.Attendance}%
-Jam Belajar: {f.Hours_Studied} jam/minggu
-Jam Tidur: {f.Sleep_Hours} jam/malam
-
-Nilai Sebelumnya: {f.Previous_Scores}/100
-Motivasi Belajar: {f.Motivation_Level}
-Sesi Bimbel: {f.Tutoring_Sessions}
-
-Pengaruh Teman: {f.Peer_Influence}
-Keterlibatan Orang Tua: {f.Parental_Involvement}
-
-Akses Internet: {f.Internet_Access}
-Akses Resource Belajar: {f.Access_to_Resources}
-
-Pendapatan Keluarga: {f.Family_Income}
-Kualitas Guru: {f.Teacher_Quality}
-
-Aktivitas Fisik: {f.Physical_Activity}x/minggu
-Pendidikan Orang Tua: {f.Parental_Education_Level}
+CONTOH note KURANG BAGUS:
+  "Kehadiran rendah dan perlu perhatian." ← terlalu generik
+  "Kehadiran siswa sangat rendah, hal ini menunjukkan bahwa siswa tersebut memiliki masalah..." ← terlalu panjang
 
 ATURAN OUTPUT:
-- Jawab HANYA JSON array
-- HARUS tepat 4 item
-- Jangan gunakan markdown
-- Jangan gunakan ```json
-- Jangan beri penjelasan tambahan
-- Status hanya boleh:
-  "good"
-  "warning"
-  "danger"
-  "info"
+- JSON array murni, tepat 4 item, urutan sesuai faktor wajib
+- Tidak ada teks di luar array, tidak ada markdown
 
-Gunakan value yang realistis berdasarkan data siswa.
-
-Contoh format:
+FORMAT:
 [
   {{
     "factor": "Kehadiran",
-    "value": "82%",
-    "status": "warning",
-    "note": "Kehadiran masih kurang konsisten dan mempengaruhi proses belajar."
+    "value": "{f.Attendance}%",
+    "status": "{att_status}",
+    "note": "Tulis di sini — max 20 kata, sertakan angka aktual."
   }},
   {{
-    "factor": "Nilai akademik",
-    "value": "68/100",
-    "status": "warning",
-    "note": "Nilai masih berada di bawah target optimal."
+    "factor": "Nilai Akademik",
+    "value": "{f.Previous_Scores}/100",
+    "status": "{prev_status}",
+    "note": "Tulis di sini — max 20 kata, sertakan angka aktual."
   }},
   {{
-    "factor": "Motivasi belajar",
-    "value": "Low",
-    "status": "danger",
-    "note": "Motivasi rendah membuat siswa kurang konsisten belajar."
+    "factor": "Motivasi Belajar",
+    "value": "{f.Motivation_Level}",
+    "status": "{motiv_status}",
+    "note": "Tulis di sini — max 20 kata, sertakan level aktual."
   }},
   {{
-    "factor": "Jam belajar",
-    "value": "4 jam/minggu",
-    "status": "danger",
-    "note": "Jam belajar sangat kurang untuk mencapai hasil maksimal."
+    "factor": "Jam Belajar",
+    "value": "{f.Hours_Studied} jam/minggu",
+    "status": "{hrs_status}",
+    "note": "Tulis di sini — max 20 kata, sertakan angka aktual."
   }}
 ]
 """
 
 
-def _recommendation_prompt(req: StudentAnalysisRequest) -> str:
-
+def _recommendation_prompt(req) -> str:
     f = req.features
     p = req.prediction
+    levels = _classify_numerik(f)
+
+    risk_tone = {
+        "High": (
+            "Siswa butuh bantuan segera. "
+            "Tulis rekomendasi yang tegas, konkret, dan bisa dimulai minggu ini. "
+            "Nada: serius tapi tetap suportif dan tidak menghakimi."
+        ),
+        "Medium": (
+            "Siswa perlu dorongan untuk berkembang. "
+            "Tulis rekomendasi yang membangun dan bisa diterapkan bertahap. "
+            "Nada: encouragement, optimis, suportif."
+        ),
+        "Low": (
+            "Siswa sudah bagus! "
+            "Tulis rekomendasi yang mengapresiasi dan mendorong konsistensi. "
+            "Nada: hangat, bangga, positif."
+        ),
+    }.get(p.risk_category, "")
+
+    # Identifikasi faktor kritis untuk fokus rekomendasi — internal
+    critical = []
+    if levels['attendance'] in ('kritis', 'perlu_perhatian'):
+        critical.append(f"kehadiran {f.Attendance}%")
+    if levels['hours'] in ('kritis', 'perlu_perhatian'):
+        critical.append(f"jam belajar {f.Hours_Studied} jam/minggu")
+    if f.Motivation_Level == "Low":
+        critical.append("motivasi rendah")
+    if levels['prev'] in ('kritis', 'perlu_perhatian'):
+        critical.append(f"nilai rapor {f.Previous_Scores}/100")
+    if f.Parental_Involvement == "Low":
+        critical.append("keterlibatan orang tua kurang")
+    if f.Peer_Influence == "Negative":
+        critical.append("pengaruh teman negatif")
+    if f.Access_to_Resources == "Low":
+        critical.append("sumber belajar terbatas")
+    if f.Family_Income == "Low":
+        critical.append("kondisi ekonomi keluarga rendah")
+
+    focus = (
+        f"Prioritaskan rekomendasi pada: {', '.join(critical)}."
+        if critical else
+        "Siswa tidak punya faktor kritis — fokus pada penguatan dan apresiasi."
+    )
 
     return f"""
-Kamu adalah AI assistant untuk guru sekolah.
+Kamu adalah asisten akademik yang membantu guru merancang langkah nyata untuk membina siswanya.
+Gunakan bahasa yang hangat, praktis, dan mudah dipahami guru Indonesia.
 
-Tugas:
-Berikan TEPAT 4 rekomendasi konkret, realistis,
-dan spesifik berdasarkan kondisi akademik siswa.
+ARAHAN UTAMA:
+{risk_tone}
 
-Rekomendasi harus:
-- praktis
-- mudah diterapkan
-- relevan dengan kondisi siswa
-- fokus meningkatkan performa akademik
+DATA SISWA:
+Risiko          : {p.risk_category} ({p.confidence:.0f}% keyakinan model)
+Kehadiran       : {f.Attendance}%
+Jam Belajar     : {f.Hours_Studied} jam/minggu
+Jam Tidur       : {f.Sleep_Hours} jam/malam
+Nilai Rapor     : {f.Previous_Scores}/100
+Motivasi        : {f.Motivation_Level}
+Sesi Bimbingan  : {f.Tutoring_Sessions} sesi
+Pengaruh Teman  : {f.Peer_Influence}
+Keterlibatan Ortu: {f.Parental_Involvement}
+Akses Internet  : {f.Internet_Access}
+Sumber Belajar  : {f.Access_to_Resources}
+Pendapatan Kel. : {f.Family_Income}
+Kualitas Guru   : {f.Teacher_Quality}
+Aktivitas Fisik : {f.Physical_Activity}x/minggu
+Pendidikan Ortu : {f.Parental_Education_Level}
 
-Jika performa siswa sudah baik,
-berikan apresiasi dan saran untuk mempertahankan performa tersebut.
+FOKUS (panduan internal, jangan tampilkan ke output):
+{focus}
 
-Data siswa:
-Nama: {_display_name(req)}
-Kategori Risiko: {p.risk_category}
-Prediksi Nilai: {p.predicted_exam_score:.1f}/100
+PANDUAN PENULISAN (ikuti ketat):
 
-Kehadiran: {f.Attendance}%
-Jam Belajar: {f.Hours_Studied} jam/minggu
-Motivasi Belajar: {f.Motivation_Level}
+"title" — 5–8 kata, jelas, aksi nyata
+  BAGUS : "Ajak Diskusi Santai tentang Hambatan Belajar"
+  KURANG: "Perhatikan Kondisi Siswa Lebih Lanjut"
 
-Nilai Sebelumnya: {f.Previous_Scores}/100
-Sesi Bimbel: {f.Tutoring_Sessions}
+"description" — 2 kalimat, max 35 kata total
+  - Kalimat 1: kenapa ini penting untuk siswa INI (sebutkan angka/kondisi aktualnya)
+  - Kalimat 2: dampak jika dilakukan atau tidak dilakukan
+  - Nada hangat, tidak menggurui, tidak kaku
+  - JANGAN sebut: dataset, model, AI, sistem
 
-Pengaruh Teman: {f.Peer_Influence}
-Keterlibatan Orang Tua: {f.Parental_Involvement}
-
-Jam Tidur: {f.Sleep_Hours} jam/malam
-Aktivitas Fisik: {f.Physical_Activity}x/minggu
+"action" — 1 kalimat, max 20 kata, langsung bisa dikerjakan guru
+  - Sebutkan caranya atau siapa yang terlibat
+  BAGUS : "Hubungi orang tua minggu ini untuk diskusi singkat tentang kebiasaan belajar di rumah."
+  KURANG: "Lakukan komunikasi dengan pihak terkait."
 
 ATURAN OUTPUT:
-- Jawab HANYA JSON array
-- HARUS tepat 4 item
-- Jangan gunakan markdown
-- Jangan gunakan ```json
-- Jangan beri penjelasan tambahan
+- JSON array murni, tepat 4 item
+- Tidak ada teks di luar array, tidak ada markdown
 
-Contoh format:
+FORMAT:
 [
   {{
-    "text": "Tingkatkan jam belajar menjadi minimal 8-10 jam per minggu."
+    "title": "5-8 kata judul aksi konkret",
+    "description": "2 kalimat max 35 kata total berbasis kondisi aktual siswa.",
+    "action": "1 kalimat langkah yang bisa langsung dilakukan guru."
   }},
   {{
-    "text": "Ajak orang tua lebih aktif memantau jadwal belajar siswa di rumah."
+    "title": "...",
+    "description": "...",
+    "action": "..."
   }},
   {{
-    "text": "Dorong siswa menjaga konsistensi kehadiran di sekolah."
+    "title": "...",
+    "description": "...",
+    "action": "..."
   }},
   {{
-    "text": "Berikan apresiasi atas perkembangan akademik siswa agar motivasi tetap tinggi."
+    "title": "...",
+    "description": "...",
+    "action": "..."
   }}
 ]
 """
+
 
 
 # ─────────────────────────────────────────────────────────────
@@ -561,7 +743,7 @@ async def recommendations(req: StudentAnalysisRequest):
 
     try:
         if GROQ_API_KEY:
-            raw = await _call_llm(_recommendation_prompt(req), max_tokens=350)
+            raw = await _call_llm(_recommendation_prompt(req), max_tokens=1500)
             parsed = _parse_json(raw)
             recs = [RecommendationItem(**item) for item in parsed]
             source = "groq"
